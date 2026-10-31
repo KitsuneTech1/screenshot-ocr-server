@@ -6,7 +6,6 @@ Shows how to call the HTTP endpoint.
 import base64
 import json
 import sys
-from pathlib import Path
 
 try:
     from urllib.request import Request, urlopen
@@ -15,7 +14,7 @@ except ImportError:
     sys.exit(1)
 
 
-def get_window_screenshot(window_name: str, server_url: str = "http://127.0.0.1:8888", token: str = None):
+def get_window_screenshot(window_name: str, server_url: str = "http://localhost:8888", token: str = None):
     """Get screenshot and OCR text for a window."""
     payload = {"window": window_name}
     headers = {"Content-Type": "application/json"}

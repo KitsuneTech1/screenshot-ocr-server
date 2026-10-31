@@ -1,8 +1,7 @@
 """
 screenshot-ocr-server
 Local HTTP server: POST a window name, get back a PNG and its OCR text.
-Built on snap.exe for focus-safe capture.
-Requires pytesseract and tesseract-ocr, or falls back to text extraction.
+Capture is delegated to snap.exe. OCR is optional.
 """
 
 import argparse
@@ -14,8 +13,9 @@ import os
 import socketserver
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 
 __version__ = "0.1.0"
@@ -24,7 +24,7 @@ __version__ = "0.1.0"
 def run_ocr_on_png(png_data: bytes) -> str:
     """
     Attempt to extract text from PNG using pytesseract.
-    Falls back to a placeholder if tesseract is not available.
+    Returns a clear status message if the optional OCR packages are unavailable.
     """
     try:
         import pytesseract
@@ -34,7 +34,7 @@ def run_ocr_on_png(png_data: bytes) -> str:
         text = pytesseract.image_to_string(img)
         return text.strip()
     except ImportError:
-        return "[OCR unavailable: install pytesseract and tesseract-ocr]"
+        return "[OCR unavailable: install pytesseract, Pillow, and Tesseract]"
     except Exception as e:
         return f"[OCR error: {str(e)}]"
 
@@ -44,8 +44,7 @@ def capture_window_as_png(window_name: str, snap_cmd: str = "snap.exe") -> Optio
     Capture a window to PNG using snap.exe.
     Returns PNG bytes or None if capture failed.
     """
-    import tempfile
-
+    tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             tmp_path = tmp.name
@@ -58,17 +57,22 @@ def capture_window_as_png(window_name: str, snap_cmd: str = "snap.exe") -> Optio
         )
 
         if result.returncode != 0:
-            error = result.stderr.strip() or f"snap.exe returned {result.returncode}"
             return None
 
-        with open(tmp_path, "rb") as f:
-            png_data = f.read()
+        png_data = Path(tmp_path).read_bytes()
+        if not png_data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return None
 
-        os.unlink(tmp_path)
         return png_data
     except Exception as e:
         print(f"Capture error: {e}", file=sys.stderr)
         return None
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
 
 
 class RequestHandler(http.server.BaseHTTPRequestHandler):
@@ -78,45 +82,65 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
     token_header = None  # Set from main
     snap_cmd = "snap.exe"
 
+    def send_json(self, status: int, payload: dict) -> None:
+        """Write a JSON response with a complete response body."""
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def method_not_allowed(self) -> None:
+        """Reject methods other than POST with the API's JSON error shape."""
+        self.send_json(405, {"error": "method not allowed"})
+
+    def do_GET(self):
+        self.method_not_allowed()
+
+    def do_PUT(self):
+        self.method_not_allowed()
+
+    def do_PATCH(self):
+        self.method_not_allowed()
+
+    def do_DELETE(self):
+        self.method_not_allowed()
+
     def do_POST(self):
         """Handle POST requests."""
         # Check authorization token if set
         if self.token_header:
             auth = self.headers.get("X-Auth-Token", "")
             if auth != self.token_header:
-                self.send_response(401)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "unauthorized"}).encode())
+                self.send_json(401, {"error": "unauthorized"})
                 return
 
         # Parse request
         try:
-            content_length = int(self.headers.get("Content-Length", 0))
+            content_length = int(self.headers.get("Content-Length", ""))
+            if content_length < 0:
+                raise ValueError("negative content length")
             body = self.rfile.read(content_length)
-            data = json.loads(body.decode())
-        except Exception as e:
-            self.send_response(400)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": "invalid request"}).encode())
+            data = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+            self.send_json(400, {"error": "invalid request"})
+            return
+
+        if not isinstance(data, dict):
+            self.send_json(400, {"error": "invalid request"})
             return
 
         window_name = data.get("window")
-        if not window_name:
-            self.send_response(400)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": "window name required"}).encode())
+        if not isinstance(window_name, str) or not window_name.strip():
+            self.send_json(400, {"error": "window name required"})
             return
+        window_name = window_name.strip()
 
         # Capture window
         png_data = capture_window_as_png(window_name, snap_cmd=self.snap_cmd)
         if png_data is None:
-            self.send_response(500)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": "capture failed"}).encode())
+            self.send_json(500, {"error": "capture failed"})
             return
 
         # Extract text from PNG
@@ -129,10 +153,7 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
             "text": text
         }
 
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps(response).encode())
+        self.send_json(200, response)
 
     def log_message(self, format, *args):
         """Suppress default logging."""
@@ -146,8 +167,8 @@ def main():
     )
     parser.add_argument(
         "--host",
-        default="127.0.0.1",
-        help="Bind address (default: 127.0.0.1)"
+        default="localhost",
+        help="Bind address (default: localhost)"
     )
     parser.add_argument(
         "--port",
