@@ -1,45 +1,33 @@
 # screenshot-ocr-server
 
-screenshot-ocr-server is a lightweight HTTP server that captures a Windows window and extracts its text via OCR.
+`screenshot-ocr-server` is a small HTTP server for Windows. Send it a window name and it asks `snap.exe` for a PNG capture. The response includes the PNG as base64 and text extracted from it.
 
-Request a screenshot of any window by name, get back a PNG image and OCR-extracted text in one response.
-
-## Features
-
-- Local HTTP server on localhost by default (opt-in only)
-- POST endpoint accepts window name, returns PNG and text
-- Uses snap.exe for focus-safe window capture
-- Optional token-based authentication
-- Pure Python stdlib (http.server)
-- Configurable OCR using pytesseract if available
+The server binds to localhost by default. It does not activate a window or send input itself.
 
 ## Requirements
 
-- Python 3.8 or higher
+- Python 3.8 or newer
 - Windows
-- snap.exe in PATH (focus-safe capture utility)
-- pytesseract and tesseract-ocr (optional, for OCR)
+- `snap.exe` in `PATH`, or a path supplied with `--snap`
 
-## Installation
+OCR is optional. Without OCR packages, the response still includes the PNG and reports that OCR is unavailable. To enable OCR, install Tesseract and the Python packages it uses:
+
+```bash
+python -m pip install pytesseract Pillow
+```
+
+Install Tesseract separately and make sure its command is available to the server process.
+
+The HTTP server uses Python's standard library. `pytesseract` and Pillow are optional runtime dependencies for OCR only.
+
+## Install
 
 ```bash
 git clone https://github.com/KitsuneTech1/screenshot-ocr-server.git
 cd screenshot-ocr-server
 ```
 
-For OCR support, install tesseract:
-
-```bash
-# Windows with chocolatey
-choco install tesseract
-
-# Then install pytesseract
-pip install pytesseract
-```
-
-## Usage
-
-Start the server:
+## Run
 
 ```bash
 python screenshot_ocr_server.py
@@ -47,16 +35,16 @@ python screenshot_ocr_server.py
 
 Options:
 
-- `--host`: Bind address (default: 127.0.0.1, localhost only)
-- `--port`: Bind port (default: 8888)
-- `--token`: Optional auth token (X-Auth-Token header)
-- `--snap`: Path to snap.exe (default: snap.exe in PATH)
+- `--host`: Address to bind to. Defaults to `localhost`.
+- `--port`: Port to bind to. Defaults to `8888`.
+- `--token`: Require this value in the `X-Auth-Token` header.
+- `--snap`: Path or command name for `snap.exe`. Defaults to `snap.exe`.
+
+Do not bind to a public interface unless you understand the risk. Screenshots can contain sensitive information.
 
 ## API
 
-POST request to http://127.0.0.1:8888
-
-Request body (JSON):
+Send a JSON POST request to `http://localhost:8888`:
 
 ```json
 {
@@ -64,44 +52,44 @@ Request body (JSON):
 }
 ```
 
-Response (JSON):
+A successful response is JSON:
 
 ```json
 {
   "window": "Notepad",
   "png_base64": "iVBORw0KGgoAAAANS...",
-  "text": "extracted text from window..."
+  "text": "text extracted from the window"
 }
 ```
 
-With authentication:
+Example with authentication:
 
 ```bash
-curl -X POST http://127.0.0.1:8888 \
+curl -X POST http://localhost:8888 \
   -H "Content-Type: application/json" \
   -H "X-Auth-Token: your-secret-token" \
   -d '{"window": "Notepad"}'
 ```
 
-## Security
+The POST endpoint returns JSON errors for invalid requests, missing authentication, and failed captures. Other methods are not supported. A failed capture returns HTTP 500. OCR failures do not discard a successful PNG capture.
 
-By default, the server binds to localhost (127.0.0.1) and does not accept remote connections.
+## Demo client
 
-Optional token authentication can be enabled with the `--token` flag to require an X-Auth-Token header.
-
-Never bind to 0.0.0.0 without strong authentication, as screenshot data is sensitive.
-
-## Running the Demo Client
+Start the server, then run:
 
 ```bash
 python demo.py
 ```
 
-## Running Tests
+The demo requests a window named `Notepad`, saves the returned PNG in the current directory, and prints the returned text.
+
+## Tests
 
 ```bash
 python -m unittest discover tests
 ```
+
+The tests use mocks. They do not open windows, send input, call `snap.exe`, or make network requests.
 
 ## License
 
