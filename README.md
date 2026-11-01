@@ -1,61 +1,65 @@
 <p align="center"><a href="https://kitsunetechnologies.org/work"><img src="https://raw.githubusercontent.com/KitsuneTech1/.github/main/assets/kitsune-banner.svg" alt="Built by Kitsune Technologies" width="760"></a></p>
 
-# screenshot-ocr-server
+# Sightline Local
 
-`screenshot-ocr-server` is a small HTTP server for Windows. Send it a window name and it asks `snap.exe` for a PNG capture. The response includes the PNG as base64 and text extracted from it.
+HTTP server for Windows that captures window screenshots and extracts text via OCR.
 
-The server binds to localhost by default. It does not activate a window or send input itself.
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) ![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)
+
+Post a window name to the server. It captures the window to PNG (using `snap.exe`), runs OCR if available, and returns both the image and extracted text. The server binds to localhost by default and does not activate windows or send input.
+
+## Quick start
+
+Clone the repo and start the server:
+
+```bash
+git clone https://github.com/KitsuneTech1/screenshot-ocr-server.git
+cd screenshot-ocr-server
+python screenshot_ocr_server.py
+```
+
+The server listens on `http://localhost:8888` by default.
 
 ## Requirements
 
 - Python 3.8 or newer
 - Windows
-- `snap.exe` in `PATH`, or a path supplied with `--snap`
+- `snap.exe` in PATH (or provide its path with `--snap`)
 
-OCR is optional. Without OCR packages, the response still includes the PNG and reports that OCR is unavailable. To enable OCR, install Tesseract and the Python packages it uses:
+## Optional: Enable OCR
+
+OCR is optional. If `pytesseract` and `Pillow` are not installed, the server still returns the PNG and reports OCR unavailable.
+
+To enable OCR, install the packages and Tesseract:
 
 ```bash
 python -m pip install pytesseract Pillow
 ```
 
-Install Tesseract separately and make sure its command is available to the server process.
+Then install Tesseract separately and make sure its command is available to your environment.
 
-The HTTP server uses Python's standard library. `pytesseract` and Pillow are optional runtime dependencies for OCR only.
+## Configuration
 
-## Install
+Command-line options:
 
-```bash
-git clone https://github.com/KitsuneTech1/screenshot-ocr-server.git
-cd screenshot-ocr-server
-```
+- `--host`: Bind address. Defaults to `localhost`.
+- `--port`: Listen port. Defaults to `8888`.
+- `--token`: API token. Required if binding to a non-loopback address.
+- `--snap`: Path to `snap.exe`. Defaults to `snap.exe`.
 
-## Run
-
-```bash
-python screenshot_ocr_server.py
-```
-
-Options:
-
-- `--host`: Address to bind to. Defaults to `localhost`.
-- `--port`: Port to bind to. Defaults to `8888`.
-- `--token`: Require this value in the `X-Auth-Token` header.
-- `--snap`: Path or command name for `snap.exe`. Defaults to `snap.exe`.
-
-Authentication is optional on loopback. A non-loopback bind requires `--token`.
-Screenshots can contain sensitive information.
+Authentication is optional on localhost. If you bind to a non-loopback address, you must provide `--token`. Screenshots can contain sensitive information, so use authentication when binding remotely.
 
 ## API
 
-Send a JSON POST request to `http://localhost:8888`:
+Send a JSON POST request:
 
-```json
-{
-  "window": "Notepad"
-}
+```bash
+curl -X POST http://localhost:8888 \
+  -H "Content-Type: application/json" \
+  -d '{"window": "Notepad"}'
 ```
 
-A successful response is JSON:
+Response:
 
 ```json
 {
@@ -65,7 +69,7 @@ A successful response is JSON:
 }
 ```
 
-Example with authentication:
+With authentication:
 
 ```bash
 curl -X POST http://localhost:8888 \
@@ -74,27 +78,29 @@ curl -X POST http://localhost:8888 \
   -d '{"window": "Notepad"}'
 ```
 
-The POST endpoint returns JSON errors for invalid requests, missing authentication, and failed captures. Other methods are not supported. A failed capture returns HTTP 500. OCR failures do not discard a successful PNG capture.
+The server returns JSON for errors, missing auth, and capture failures. Failed captures return HTTP 500. OCR failures do not discard a successful PNG.
 
-Requests larger than 1 MiB and window names longer than 512 characters are rejected. Captures larger than 20 MiB are rejected. Incomplete requests time out after 10 seconds.
+Limits: 1 MiB request body, 512-character window names, 20 MiB PNG, 10-second request timeout.
 
-## Demo client
+## Examples
 
-Start the server, then run:
+Run the demo client (requires server running):
 
 ```bash
 python demo.py
 ```
 
-The demo requests a window named `Notepad`, saves the returned PNG in the current directory, and prints the returned text.
+It captures a Notepad window, saves the PNG, and prints the extracted text.
 
-## Tests
+## Testing
+
+Run the test suite:
 
 ```bash
 python -m unittest discover tests
 ```
 
-The tests use mocks. They do not open windows, send input, call `snap.exe`, or make network requests.
+Tests use mocks and do not capture real windows, call `snap.exe`, or make network requests.
 
 ## License
 
