@@ -139,6 +139,28 @@ class TestScreenshotOCRServer(unittest.TestCase):
         self.assertEqual(response, {"error": "unauthorized"})
         capture.assert_not_called()
 
+    def test_http_success_with_matching_token_and_trimmed_window(self):
+        png = b"\x89PNG\r\n\x1a\nimage"
+        with patch.object(sos, "capture_window_as_png", return_value=png) as capture:
+            with patch.object(sos, "run_ocr_on_png", return_value="hello"):
+                status, response = self.run_handler(
+                    {"window": "  Editor  "}, token="secret", request_token="secret"
+                )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(response["window"], "Editor")
+        self.assertEqual(base64.b64decode(response["png_base64"]), png)
+        self.assertEqual(response["text"], "hello")
+        capture.assert_called_once_with("Editor", snap_cmd=sos.RequestHandler.snap_cmd)
+
+    def test_http_rejects_empty_configured_token(self):
+        with patch.object(sos, "capture_window_as_png") as capture:
+            status, response = self.run_handler({"window": "Editor"}, token="")
+
+        self.assertEqual(status, 401)
+        self.assertEqual(response, {"error": "unauthorized"})
+        capture.assert_not_called()
+
     def test_http_reports_capture_failure(self):
         with patch.object(sos, "capture_window_as_png", return_value=None):
             status, response = self.run_handler({"window": "Editor"})
