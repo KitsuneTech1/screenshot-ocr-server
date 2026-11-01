@@ -40,7 +40,8 @@ Options:
 - `--token`: Require this value in the `X-Auth-Token` header.
 - `--snap`: Path or command name for `snap.exe`. Defaults to `snap.exe`.
 
-Do not bind to a public interface unless you understand the risk. Screenshots can contain sensitive information.
+Authentication is optional on loopback. A non-loopback bind requires `--token`.
+Screenshots can contain sensitive information.
 
 ## API
 
@@ -72,6 +73,8 @@ curl -X POST http://localhost:8888 \
 ```
 
 The POST endpoint returns JSON errors for invalid requests, missing authentication, and failed captures. Other methods are not supported. A failed capture returns HTTP 500. OCR failures do not discard a successful PNG capture.
+
+Requests larger than 1 MiB and window names longer than 512 characters are rejected. Captures larger than 20 MiB are rejected. Incomplete requests time out after 10 seconds.
 
 ## Demo client
 

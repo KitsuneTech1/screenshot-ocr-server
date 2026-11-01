@@ -4,11 +4,13 @@ Tests HTTP request handling, authentication, and error cases.
 """
 
 import base64
+import argparse
 import io
 import json
 import subprocess
 import sys
 import unittest
+from contextlib import redirect_stderr
 from email.message import Message
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -18,7 +20,14 @@ import screenshot_ocr_server as sos
 
 class TestScreenshotOCRServer(unittest.TestCase):
 
-    def run_handler(self, payload, token=None, request_token=None, method="POST"):
+    def run_handler(
+        self,
+        payload,
+        token=None,
+        request_token=None,
+        method="POST",
+        content_length=None,
+    ):
         """Run a handler request without opening a socket."""
         if isinstance(payload, bytes):
             body = payload
@@ -26,7 +35,9 @@ class TestScreenshotOCRServer(unittest.TestCase):
             body = json.dumps(payload).encode("utf-8")
 
         headers = Message()
-        headers["Content-Length"] = str(len(body))
+        headers["Content-Length"] = str(
+            len(body) if content_length is None else content_length
+        )
         if request_token is not None:
             headers["X-Auth-Token"] = request_token
 
@@ -78,7 +89,11 @@ class TestScreenshotOCRServer(unittest.TestCase):
 
         with patch.object(sos, "tempfile", SimpleNamespace(NamedTemporaryFile=lambda **kwargs: TemporaryFile())):
             with patch.object(sos.subprocess, "run", return_value=MagicMock(returncode=0, stderr="")):
-                with patch.object(sos.Path, "read_bytes", return_value=b"\x89PNG\r\n\x1a\nimage"):
+                with patch.object(
+                    sos.Path,
+                    "open",
+                    return_value=io.BytesIO(b"\x89PNG\r\n\x1a\nimage"),
+                ):
                     with patch.object(sos.os, "unlink") as unlink:
                         result = sos.capture_window_as_png("Test Window")
 
@@ -99,12 +114,84 @@ class TestScreenshotOCRServer(unittest.TestCase):
             with self.subTest(output=output):
                 with patch.object(sos, "tempfile", SimpleNamespace(NamedTemporaryFile=lambda **kwargs: TemporaryFile())):
                     with patch.object(sos.subprocess, "run", return_value=MagicMock(returncode=0, stderr="")):
-                        with patch.object(sos.Path, "read_bytes", side_effect=output if isinstance(output, Exception) else None, return_value=output if not isinstance(output, Exception) else None):
+                        with patch.object(sos.Path, "open", side_effect=output if isinstance(output, Exception) else None, return_value=io.BytesIO(output) if not isinstance(output, Exception) else None):
                             with patch.object(sos.os, "unlink") as unlink:
                                 result = sos.capture_window_as_png("Test Window")
 
                 self.assertIsNone(result)
                 unlink.assert_called_once_with("capture.png")
+
+    def test_capture_window_limits_output_size(self):
+        class TemporaryFile:
+            name = "capture.png"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        with patch.object(sos, "MAX_PNG_BYTES", 8):
+            with patch.object(
+                sos,
+                "tempfile",
+                SimpleNamespace(
+                    NamedTemporaryFile=lambda **kwargs: TemporaryFile()
+                ),
+            ):
+                with patch.object(
+                    sos.subprocess,
+                    "run",
+                    return_value=MagicMock(returncode=0),
+                ):
+                    with patch.object(
+                        sos.Path,
+                        "open",
+                        return_value=io.BytesIO(b"\x89PNG\r\n\x1a\n!") ,
+                    ):
+                        with patch.object(sos.os, "unlink"):
+                            result = sos.capture_window_as_png("Test Window")
+
+        self.assertIsNone(result)
+
+    def test_capture_window_does_not_capture_child_output(self):
+        class TemporaryFile:
+            name = "capture.png"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        with patch.object(
+            sos,
+            "tempfile",
+            SimpleNamespace(NamedTemporaryFile=lambda **kwargs: TemporaryFile()),
+        ):
+            with patch.object(
+                sos.subprocess,
+                "run",
+                return_value=MagicMock(returncode=1),
+            ) as run:
+                with patch.object(sos.os, "unlink"):
+                    sos.capture_window_as_png("Test Window")
+
+        self.assertIs(run.call_args.kwargs["stdout"], sos.subprocess.DEVNULL)
+        self.assertIs(run.call_args.kwargs["stderr"], sos.subprocess.DEVNULL)
+
+    def test_capture_errors_do_not_log_exception_details(self):
+        with patch.object(
+            sos.subprocess,
+            "run",
+            side_effect=RuntimeError("private-marker"),
+        ):
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                result = sos.capture_window_as_png("Test Window")
+
+        self.assertIsNone(result)
+        self.assertEqual(stderr.getvalue(), "Capture error\n")
 
     def test_http_success_returns_png_and_text(self):
         png = b"\x89PNG\r\n\x1a\nimage"
@@ -130,6 +217,32 @@ class TestScreenshotOCRServer(unittest.TestCase):
                 status, response = self.run_handler(payload)
                 self.assertEqual(status, 400)
                 self.assertEqual(response, {"error": error})
+
+    def test_http_rejects_oversized_requests_before_reading_body(self):
+        with patch.object(sos, "capture_window_as_png") as capture:
+            status, response = self.run_handler(
+                b"{}",
+                content_length=sos.MAX_REQUEST_BYTES + 1,
+            )
+
+        self.assertEqual(status, 413)
+        self.assertEqual(response, {"error": "request too large"})
+        capture.assert_not_called()
+
+    def test_http_rejects_oversized_window_names(self):
+        status, response = self.run_handler(
+            {"window": "x" * (sos.MAX_WINDOW_NAME_LENGTH + 1)}
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(response, {"error": "window name too long"})
+
+    def test_http_rejects_deeply_nested_json(self):
+        body = b"[" * 1000 + b"]" * 1000
+        status, response = self.run_handler(body)
+
+        self.assertEqual(status, 400)
+        self.assertEqual(response, {"error": "invalid request"})
 
     def test_http_requires_token_before_capture(self):
         with patch.object(sos, "capture_window_as_png") as capture:
@@ -181,22 +294,36 @@ class TestScreenshotOCRServer(unittest.TestCase):
 
     def test_ocr_with_invalid_png(self):
         """Test OCR handles invalid PNG gracefully."""
-        text = sos.run_ocr_on_png(b"not a png")
-        self.assertTrue("error" in text.lower() or "unavailable" in text.lower())
+        class ImageModule:
+            @staticmethod
+            def open(stream):
+                raise RuntimeError("private-marker")
 
-    def test_token_header_attribute(self):
-        """Test RequestHandler token header attribute can be set."""
-        original = sos.RequestHandler.token_header
-        sos.RequestHandler.token_header = "test-token"
-        self.assertEqual(sos.RequestHandler.token_header, "test-token")
-        sos.RequestHandler.token_header = original
+        with patch.dict(
+            sys.modules,
+            {"pytesseract": SimpleNamespace(), "PIL": SimpleNamespace(Image=ImageModule)},
+        ):
+            text = sos.run_ocr_on_png(b"not a png")
 
-    def test_snap_cmd_attribute(self):
-        """Test RequestHandler snap_cmd attribute can be set."""
-        original = sos.RequestHandler.snap_cmd
-        sos.RequestHandler.snap_cmd = "custom-snap.exe"
-        self.assertEqual(sos.RequestHandler.snap_cmd, "custom-snap.exe")
-        sos.RequestHandler.snap_cmd = original
+        self.assertEqual(text, "[OCR error]")
+
+    def test_bind_security_requires_authentication_off_loopback(self):
+        with self.assertRaises(ValueError):
+            sos.validate_bind_security("0.0.0.0", None)
+
+        sos.validate_bind_security("localhost", None)
+        sos.validate_bind_security("0.0.0.0", "secret")
+
+    def test_request_handler_has_a_socket_read_timeout(self):
+        self.assertEqual(sos.RequestHandler.timeout, sos.REQUEST_TIMEOUT_SECONDS)
+
+    def test_cli_value_parsers_reject_invalid_security_values(self):
+        self.assertEqual(sos.port_number("8888"), 8888)
+        self.assertEqual(sos.non_empty_token("secret"), "secret")
+        with self.assertRaises(argparse.ArgumentTypeError):
+            sos.port_number("70000")
+        with self.assertRaises(argparse.ArgumentTypeError):
+            sos.non_empty_token("   ")
 
 
 if __name__ == "__main__":
