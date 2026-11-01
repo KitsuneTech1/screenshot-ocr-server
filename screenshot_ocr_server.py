@@ -110,9 +110,9 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         """Handle POST requests."""
         # Check authorization token if set
-        if self.token_header:
+        if self.token_header is not None:
             auth = self.headers.get("X-Auth-Token", "")
-            if auth != self.token_header:
+            if not self.token_header or auth != self.token_header:
                 self.send_json(401, {"error": "unauthorized"})
                 return
 
