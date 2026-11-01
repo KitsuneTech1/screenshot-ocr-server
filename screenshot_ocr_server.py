@@ -7,9 +7,11 @@ Capture is delegated to snap.exe. OCR is optional.
 import argparse
 import base64
 import http.server
+import ipaddress
 import io
 import json
 import os
+import secrets
 import socketserver
 import subprocess
 import sys
@@ -19,6 +21,11 @@ from typing import Optional
 
 
 __version__ = "0.1.0"
+MAX_REQUEST_BYTES = 1024 * 1024
+MAX_PNG_BYTES = 20 * 1024 * 1024
+MAX_WINDOW_NAME_LENGTH = 512
+CAPTURE_TIMEOUT_SECONDS = 10
+REQUEST_TIMEOUT_SECONDS = 10
 
 
 def run_ocr_on_png(png_data: bytes) -> str:
@@ -35,8 +42,8 @@ def run_ocr_on_png(png_data: bytes) -> str:
         return text.strip()
     except ImportError:
         return "[OCR unavailable: install pytesseract, Pillow, and Tesseract]"
-    except Exception as e:
-        return f"[OCR error: {str(e)}]"
+    except Exception:
+        return "[OCR error]"
 
 
 def capture_window_as_png(window_name: str, snap_cmd: str = "snap.exe") -> Optional[bytes]:
@@ -51,21 +58,26 @@ def capture_window_as_png(window_name: str, snap_cmd: str = "snap.exe") -> Optio
 
         result = subprocess.run(
             [snap_cmd, "--window", window_name, "--output", tmp_path],
-            capture_output=True,
-            text=True,
-            timeout=10
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=CAPTURE_TIMEOUT_SECONDS,
+            check=False,
         )
 
         if result.returncode != 0:
             return None
 
-        png_data = Path(tmp_path).read_bytes()
+        with Path(tmp_path).open("rb") as png_file:
+            png_data = png_file.read(MAX_PNG_BYTES + 1)
+
+        if len(png_data) > MAX_PNG_BYTES:
+            return None
         if not png_data.startswith(b"\x89PNG\r\n\x1a\n"):
             return None
 
         return png_data
-    except Exception as e:
-        print(f"Capture error: {e}", file=sys.stderr)
+    except Exception:
+        print("Capture error", file=sys.stderr)
         return None
     finally:
         if tmp_path:
@@ -79,6 +91,7 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
     """HTTP request handler for screenshot-ocr-server."""
 
     # Server configuration
+    timeout = REQUEST_TIMEOUT_SECONDS
     token_header = None  # Set from main
     snap_cmd = "snap.exe"
 
@@ -112,7 +125,9 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
         # Check authorization token if set
         if self.token_header is not None:
             auth = self.headers.get("X-Auth-Token", "")
-            if not self.token_header or auth != self.token_header:
+            if not self.token_header or not secrets.compare_digest(
+                auth, self.token_header
+            ):
                 self.send_json(401, {"error": "unauthorized"})
                 return
 
@@ -121,9 +136,14 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
             content_length = int(self.headers.get("Content-Length", ""))
             if content_length < 0:
                 raise ValueError("negative content length")
+            if content_length > MAX_REQUEST_BYTES:
+                self.send_json(413, {"error": "request too large"})
+                return
             body = self.rfile.read(content_length)
+            if len(body) != content_length:
+                raise ValueError("incomplete request body")
             data = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError, RecursionError):
             self.send_json(400, {"error": "invalid request"})
             return
 
@@ -136,6 +156,9 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_json(400, {"error": "window name required"})
             return
         window_name = window_name.strip()
+        if len(window_name) > MAX_WINDOW_NAME_LENGTH:
+            self.send_json(400, {"error": "window name too long"})
+            return
 
         # Capture window
         png_data = capture_window_as_png(window_name, snap_cmd=self.snap_cmd)
@@ -160,6 +183,38 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+def validate_bind_security(host: str, token: Optional[str]) -> None:
+    """Require authentication when binding anywhere beyond loopback."""
+    normalized_host = host.strip().lower()
+    is_loopback = normalized_host == "localhost"
+    if not is_loopback:
+        try:
+            is_loopback = ipaddress.ip_address(normalized_host).is_loopback
+        except ValueError:
+            is_loopback = False
+
+    if not is_loopback and not token:
+        raise ValueError("--token is required when --host is not loopback")
+
+
+def port_number(value: str) -> int:
+    """Parse a valid TCP port for argparse."""
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("port must be an integer") from exc
+    if not 0 <= port <= 65535:
+        raise argparse.ArgumentTypeError("port must be between 0 and 65535")
+    return port
+
+
+def non_empty_token(value: str) -> str:
+    """Reject an empty CLI token that would make authentication unusable."""
+    if not value or not value.strip():
+        raise argparse.ArgumentTypeError("token must not be empty")
+    return value
+
+
 def main():
     """Start the screenshot-ocr server."""
     parser = argparse.ArgumentParser(
@@ -172,12 +227,13 @@ def main():
     )
     parser.add_argument(
         "--port",
-        type=int,
+        type=port_number,
         default=8888,
         help="Bind port (default: 8888)"
     )
     parser.add_argument(
         "--token",
+        type=non_empty_token,
         help="Optional auth token header (X-Auth-Token)"
     )
     parser.add_argument(
@@ -187,6 +243,11 @@ def main():
     )
 
     args = parser.parse_args()
+
+    try:
+        validate_bind_security(args.host, args.token)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     # Set up handler
     RequestHandler.token_header = args.token
