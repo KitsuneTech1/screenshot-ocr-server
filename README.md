@@ -4,9 +4,21 @@
 
 HTTP server for Windows that captures window screenshots and extracts text via OCR.
 
+[![Build Status](https://github.com/KitsuneTech1/screenshot-ocr-server/actions/workflows/ci.yml/badge.svg)](https://github.com/KitsuneTech1/screenshot-ocr-server/actions)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) ![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)
 
 Post a window name to the server. It captures the window to PNG (using `snap.exe`), runs OCR if available, and returns both the image and extracted text. The server binds to localhost by default and does not activate windows or send input.
+
+
+## Architecture & Data Flow
+
+```mermaid
+flowchart LR
+    A[HTTP Request: POST /capture or /ocr] --> B[Windows Window Capture: GDI PrintWindow]
+    B --> C[Image Preprocessing: Grayscale & Contrast]
+    C --> D[Windows.Media.Ocr Engine]
+    D --> E[JSON Response: Detected Text & Bounding Boxes]
+```
 
 ## Quick start
 
